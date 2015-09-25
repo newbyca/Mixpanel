@@ -25,6 +25,7 @@ namespace Mixpanel
 
         private bool _isGeolocationEnabled = true;
         private bool _isVerboseEnabled = false;
+        private bool _isOfflineEnabled = true;
 
         private string _userAgent;
 
@@ -88,6 +89,25 @@ namespace Mixpanel
             }
         }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether offline mode is enabled. 
+        /// True by default.
+        /// </summary>
+        /// <value>
+        /// <c>true</c> if offline mode is enabled; otherwise, <c>false</c>.
+        /// </value>
+        public bool OfflineEnabled
+        {
+            get
+            {
+                return _isOfflineEnabled;
+            }
+            set
+            {
+                _isOfflineEnabled = value;
+            }
+        }
+
         private MixpanelClient()
         {
         }
@@ -96,16 +116,20 @@ namespace Mixpanel
         /// Gets the current Mixpanel client instance.
         /// </summary>
         /// <returns></returns>
-        public static MixpanelClient GetCurrentClient()
+        public static MixpanelClient GetCurrentClient(bool offlineEnabled = true)
         {
-            if (_current != null)
+            if (_current != null) {
+                _current._isOfflineEnabled = offlineEnabled;
                 return _current;
+            }
 
             _current = new MixpanelClient();
-            ThreadPool.QueueUserWorkItem(new WaitCallback(delegate
-                {
-                    _current.TrySendLocalElements();
-                }));
+            _current._isOfflineEnabled = offlineEnabled;
+            if (offlineEnabled) {
+                ThreadPool.QueueUserWorkItem(new WaitCallback(delegate {
+                        _current.TrySendLocalElements();
+                    }));
+            }
             return _current;
         }
 
@@ -121,8 +145,12 @@ namespace Mixpanel
             if (element == null)
                 throw new ArgumentNullException("element");
 
-            WriteToFile(element);
-            SendFile(element.EndpointName, element.FileName);
+            if (_isOfflineEnabled) {
+                WriteToFile(element);
+                SendFile(element.EndpointName, element.FileName);
+            } else {
+                SendFile(element);
+            }
         }
 
         /// <summary>
@@ -224,6 +252,28 @@ namespace Mixpanel
             return true;
         }
 
+        private bool SendFile(MixpanelEntity element)
+        {
+            if (element == null)
+                throw new ArgumentNullException("element");
+
+            string data = ToMixpanelData(element);
+            using (WebClient client = new WebClient()) {
+                client.Headers[HttpRequestHeader.UserAgent] = UserAgent;
+                string urlFormat = GetUrlFormat();
+                string url = string.Format(CultureInfo.InvariantCulture, urlFormat, element.EndpointName, data);
+                try {
+                    client.DownloadString(url);
+                }
+                catch (Exception ex) {
+                    Debug.WriteLine("MixpanelClient.Track failed: could not send event (endpoint=" + element.EndpointName + ", data=" + data + "). Error: " + ex);
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         /// <summary>
         /// Tries to send locally stored elements if any and if there's a network connection.
         /// This method is called automatically when a new instance of a MixpanelClient is created.
@@ -258,13 +308,9 @@ namespace Mixpanel
             WriteToFile(element);
         }
 
-        private static void WriteToFile(MixpanelEntity element)
+        private void WriteToFile(MixpanelEntity element)
         {
-            Dictionary<string, object> values = new Dictionary<string, object>();
-            element.CopyTo(values);
-            string json = JsonConvert.SerializeObject(values);
-            string b64 = Utilities.ToBase64(json);
-
+            string b64 = ToMixpanelData(element);
             using (IsolatedStorageFile store = IsolatedStorageFile.GetUserStoreForAssembly())
             {
                 if (!store.DirectoryExists(element.EndpointName))
@@ -283,7 +329,7 @@ namespace Mixpanel
             }
         }
 
-        private static string ReadFromFile(string endpointName, string fileName)
+        private string ReadFromFile(string endpointName, string fileName)
         {
             using (IsolatedStorageFile store = IsolatedStorageFile.GetUserStoreForAssembly())
             {
@@ -304,7 +350,7 @@ namespace Mixpanel
             }
         }
 
-        private static void DeleteFile(string endpointName, string fileName)
+        private void DeleteFile(string endpointName, string fileName)
         {
             using (IsolatedStorageFile store = IsolatedStorageFile.GetUserStoreForAssembly())
             {
@@ -318,5 +364,14 @@ namespace Mixpanel
                 Utilities.WrapSharingViolations(() => store.DeleteFile(path));
             }
         }
+
+        private string ToMixpanelData(MixpanelEntity element)
+        {
+            Dictionary<string, object> values = new Dictionary<string, object>();
+            element.CopyTo(values);
+            string json = JsonConvert.SerializeObject(values);
+            return Utilities.ToBase64(json);
+        }
+
     }
 }
